@@ -10,11 +10,12 @@ use http::{Request, Response, StatusCode};
 use hyper::{header, Body};
 use log::{trace, warn};
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
-use std::error::Error as StdError;
+// use std::error::Error as StdError;
 use std::ffi::OsStr;
 use std::fmt::Write;
 use std::io;
 use std::path::{Path, PathBuf};
+use thiserror::Error;
 use tokio_fs::DirEntry;
 
 /// The entry point to extensions. Extensions are given both the request and the
@@ -45,7 +46,7 @@ pub async fn serve(
             maybe_convert_mime_type_to_text(&req, &mut resp);
             Ok(resp)
         }
-        Err(super::Error::Io(e)) => {
+        Err(super::Error::Io { source: e }) => {
             // If the requested file was not found, then try doing a directory listing.
             if e.kind() == io::ErrorKind::NotFound {
                 let list_dir_resp = maybe_list_dir(&config.root_dir, &path).await?;
@@ -193,14 +194,14 @@ async fn list_dir(root_dir: &Path, path: &Path) -> Result<Response<Body>> {
 fn make_dir_list_body(root_dir: &Path, paths: &[PathBuf]) -> Result<String> {
     let mut buf = String::new();
 
-    writeln!(buf, "<div>").map_err(Error::WriteInDirList)?;
+    writeln!(buf, "<div>").map_err(|source| Error::WriteInDirList { source })?;
 
     let dot_dot = OsStr::new("..");
 
     for path in paths {
         let full_url = path
             .strip_prefix(root_dir)
-            .map_err(Error::StripPrefixInDirList)?;
+            .map_err(|source| Error::StripPrefixInDirList { source })?;
         let maybe_dot_dot = || {
             if path.ends_with("..") {
                 Some(dot_dot)
@@ -221,9 +222,9 @@ fn make_dir_list_body(root_dir: &Path, paths: &[PathBuf]) -> Result<String> {
 
                     // TODO: Make this a relative URL
                     writeln!(buf, "<div><a href='/{}'>{}</a></div>", full_url, file_name)
-                        .map_err(Error::WriteInDirList)?;
-                } else {
-                    warn!("non-unicode url: {}", full_url.to_string_lossy());
+                        .map_err(|source| Error::WriteInDirList { source })?;
+                    } else {
+                        warn!("non-unicode url: {}", full_url.to_string_lossy());
                 }
             } else {
                 warn!("non-unicode path: {}", file_name.to_string_lossy());
@@ -233,7 +234,7 @@ fn make_dir_list_body(root_dir: &Path, paths: &[PathBuf]) -> Result<String> {
         }
     }
 
-    writeln!(buf, "</div>").map_err(Error::WriteInDirList)?;
+    writeln!(buf, "</div>").map_err(|source| Error::WriteInDirList { source })?;
 
     let cfg = HtmlCfg {
         title: String::new(),
@@ -245,58 +246,39 @@ fn make_dir_list_body(root_dir: &Path, paths: &[PathBuf]) -> Result<String> {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Debug, Display)]
+#[derive(Debug, Error)]
 pub enum Error {
     // blanket "pass-through" error types
-    #[display(fmt = "engine error")]
-    Engine(Box<super::Error>),
+    #[error("engine error")]
+    Engine { source: Box<super::Error> },
 
-    #[display(fmt = "HTTP error")]
-    Http(http::Error),
+    #[error("HTTP error")]
+    Http {
+        #[from]
+        source: http::Error,
+    },
 
-    #[display(fmt = "I/O error")]
-    Io(io::Error),
+    #[error("I/O error")]
+    Io {
+        #[from]
+        source: io::Error,
+    },
 
     // custom "semantic" error types
-    #[display(fmt = "markdown is not UTF-8")]
+    #[error("markdown is not UTF-8")]
     MarkdownUtf8,
 
-    #[display(fmt = "failed to strip prefix in directory listing")]
-    StripPrefixInDirList(std::path::StripPrefixError),
+    #[error("failed to strip prefix in directory listing")]
+    StripPrefixInDirList { source: std::path::StripPrefixError },
 
-    #[display(fmt = "formatting error while creating directory listing")]
-    WriteInDirList(std::fmt::Error),
-}
-
-impl StdError for Error {
-    fn source(&self) -> Option<&(dyn StdError + 'static)> {
-        use Error::*;
-
-        match self {
-            Engine(e) => Some(e),
-            Io(e) => Some(e),
-            Http(e) => Some(e),
-            MarkdownUtf8 => None,
-            StripPrefixInDirList(e) => Some(e),
-            WriteInDirList(e) => Some(e),
-        }
-    }
+    #[error("formatting error while creating directory listing")]
+    WriteInDirList { source: std::fmt::Error },
 }
 
 impl From<super::Error> for Error {
     fn from(e: super::Error) -> Error {
-        Error::Engine(Box::new(e))
-    }
-}
-
-impl From<http::Error> for Error {
-    fn from(e: http::Error) -> Error {
-        Error::Http(e)
-    }
-}
-
-impl From<io::Error> for Error {
-    fn from(e: io::Error) -> Error {
-        Error::Io(e)
+        Error::Engine {
+            source: Box::new(e),
+        }
     }
 }
