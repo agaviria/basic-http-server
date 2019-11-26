@@ -2,9 +2,7 @@
 
 use bytes::BytesMut;
 use env_logger::{Builder, Env};
-use futures::future;
 use futures::stream::StreamExt;
-use futures::FutureExt;
 use handlebars::Handlebars;
 use http::header::{HeaderMap, HeaderValue};
 use http::status::StatusCode;
@@ -68,6 +66,9 @@ pub struct Config {
 }
 
 fn run() -> Result<()> {
+    use futures::channel::oneshot;
+    use futures::prelude::*;
+
     // Initialize logging, and log the "info" level for this crate only, unless
     // the environment contains `RUST_LOG`.
     let env = Env::new().default_filter_or("basic_http_server=info");
@@ -109,9 +110,15 @@ fn run() -> Result<()> {
     // our service builder.
     let server = Server::bind(&config.addr).serve(make_service);
 
+    // Graceful Hyper Server shutdown
+    let (_tx, until_rx) = oneshot::channel::<()>();
+    let graceful = server.with_graceful_shutdown(async {
+        until_rx.await.ok();
+    });
+
     // Create a Tokio runtime and block on Hyper forever.
     let rt = Runtime::new()?;
-    rt.block_on(server)?;
+    rt.block_on(graceful)?;
 
     Ok(())
 }
